@@ -12,25 +12,28 @@ from azure.identity import (
     ManagedIdentityCredential,
     get_bearer_token_provider,
 )
+from env_config import read_env_config, set_env
 from langchain_openai import AzureOpenAIEmbeddings, OpenAIEmbeddings
 from openai import AzureOpenAI, OpenAI
 from openai.types.chat.chat_completion import ChatCompletion
 
-from env_config import read_env_config, set_env
-
 logger = logging.getLogger("client_utils")
 
 
-def build_openai_client(**kwargs: Any) -> OpenAI | AzureOpenAI:
+def build_openai_client(
+    prefix: str = "COMPLETION", **kwargs: Any
+) -> OpenAI | AzureOpenAI:
     """
     Builds a OpenAI completions model client.
+
+    Args:
+        prefix (str): The prefix of the environment variables to use for configuration.
 
     Returns:
         OpenAI | AzureOpenAI: The OpenAI completions model client.
     """
     kwargs = _remove_empty_values(kwargs)
-    use_prefix = kwargs["prefix"]
-    env = read_env_config(use_prefix)
+    env = read_env_config(use_prefix=prefix)
     with set_env(**env):
         if is_azure():
             auth_args = _get_azure_auth_client_args()
@@ -41,17 +44,20 @@ def build_openai_client(**kwargs: Any) -> OpenAI | AzureOpenAI:
 
 
 def build_langchain_embeddings(
+    prefix: str = "EMBEDDING",
     **kwargs: Any,
 ) -> OpenAIEmbeddings | AzureOpenAIEmbeddings:
     """
     Builds a LangChain embeddings model client.
 
+    Args:
+        prefix (str): The prefix of the environment variables to use for configuration.
+
     Returns:
         OpenAIEmbeddings | AzureOpenAIEmbeddings: The LangChain embeddings model client.
     """
     kwargs = _remove_empty_values(kwargs)
-    use_prefix = kwargs["prefix"]
-    env = read_env_config(use_prefix)
+    env = read_env_config(use_prefix=prefix)
     with set_env(**env):
         if is_azure():
             auth_args = _get_azure_auth_client_args()

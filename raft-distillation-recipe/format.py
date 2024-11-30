@@ -1,10 +1,10 @@
 import argparse
 import logging
 from abc import ABC, abstractmethod
+import time
 from typing import Any, Literal, get_args
 
 from datasets import Dataset, load_dataset
-
 from logconf import log_setup
 
 log_setup()
@@ -161,6 +161,9 @@ class DatasetConverter:
                 f"Output type {output_type} is not supported. Please select one of {self.exporters.keys()}."
             )
 
+        logger.info(
+            f"Converting dataset. Formatting to {format} and exporting as {output_type}."
+        )
         formatter = self.formats[format]
         new_ds = formatter.format(ds, **kwargs)
         exporter = self.exporters[output_type]
@@ -226,7 +229,7 @@ class OpenAICompletionDatasetFormatter(DatasetFormatter):
                 completion_column: [answer + stop for answer in examples["cot_answer"]]
             },
             batched=True,
-            desc=f"Rename fields and add '{stop}' token",
+            desc=f"Rename fields 'instruction' to {prompt_column} and add '{stop}' token to answer in {completion_column}",
         )
         return _remove_all_columns_but(new_ds, [prompt_column, completion_column])
 
@@ -240,6 +243,8 @@ class OpenAIChatDatasetFormatter(OpenAICompletionDatasetFormatter):
 
     def format(self, ds: Dataset, system_prompt: str, **kwargs) -> Dataset:
         new_ds = super().format(ds, stop="", **kwargs)
+
+        logger.info(f"Column names: {new_ds.column_names}.")
 
         def format_messages(row: dict) -> dict:
             messages = []
@@ -349,20 +354,23 @@ def append_extension(path: str, extension: str) -> str:
 
 
 class ParquetDatasetExporter(DatasetExporter):
-    """Exports the Dataset to a JSONL file."""
+    """Exports the Dataset to a Parquet file."""
 
     def export(self, ds: Dataset, output_path: str):
         ds.to_parquet(append_extension(output_path, "parquet"))
 
 
 class JsonlDatasetExporter(DatasetExporter):
-    """Exports the Dataset to a Parquet file."""
+    """Exports the Dataset to a JSONL file."""
 
     def export(self, ds: Dataset, output_path: str):
-        ds.to_parquet(append_extension(output_path, "jsonl"))
+        ds.to_json(append_extension(output_path, "jsonl"))
 
 
 def main():
+    main_start = time.time()
+
+    # Get arguments
     args = parse_args()
 
     input_type = args.input_type
@@ -395,6 +403,10 @@ def main():
         args.output_type,
         **format_params,
     )
+
+    logger.info(f"Generated {len(ds)} QA/CoT/documents samples.")
+    logger.info(f"Dataset saved to {args.output}.")
+    logger.info(f"Done in {time.time() - main_start:.2f}s.")
 
 
 if __name__ == "__main__":

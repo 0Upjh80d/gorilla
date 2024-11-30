@@ -10,11 +10,10 @@ from pathlib import Path
 import PyPDF2
 import torch
 from datasets import Dataset, concatenate_datasets
-from transformers import AutoModelForSeq2SeqLM, AutoTokenizer, pipeline
-
 from format import dataset_formats, output_dataset_types
 from logconf import log_setup
 from raft import DocType, doc_types
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer, pipeline
 
 log_setup()
 

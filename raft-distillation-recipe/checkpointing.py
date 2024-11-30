@@ -8,7 +8,7 @@ from typing import Callable
 
 from datasets import Dataset, concatenate_datasets
 
-logger = logging.getLogger("raft")
+logger = logging.getLogger("checkpointing")
 
 
 @dataclass

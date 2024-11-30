@@ -14,15 +14,6 @@ from typing import Literal, get_args
 import datasets
 import pyarrow as pa
 import PyPDF2
-from datasets import Dataset
-from dotenv import load_dotenv
-from langchain_experimental.text_splitter import SemanticChunker
-from langchain_openai import AzureOpenAIEmbeddings, OpenAIEmbeddings
-from mdc import MDC
-from openai import BadRequestError
-from openai.types.chat.chat_completion import ChatCompletion
-from tqdm import tqdm
-
 from checkpointing import Checkpointing, checkpointed
 from client_utils import (
     ChatCompleter,
@@ -30,8 +21,21 @@ from client_utils import (
     build_langchain_embeddings,
     build_openai_client,
 )
-from format import DatasetConverter, dataset_formats, output_dataset_types
+from datasets import Dataset
+from dotenv import load_dotenv
+from format import (
+    DatasetConverter,
+    append_extension,
+    dataset_formats,
+    output_dataset_types,
+)
+from langchain_experimental.text_splitter import SemanticChunker
+from langchain_openai import AzureOpenAIEmbeddings, OpenAIEmbeddings
 from logconf import log_setup
+from mdc import MDC
+from openai import BadRequestError
+from openai.types.chat.chat_completion import ChatCompletion
+from tqdm import tqdm
 
 log_setup()
 
@@ -99,6 +103,12 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="completion",
         help="The completion column name to use for the completion format",
+    )
+    parser.add_argument(
+        "--output-completion-stop",
+        type=str,
+        default="<STOP>",
+        help="The stop keyword to use for the completion format",
     )
     parser.add_argument(
         "--distractors",
@@ -330,8 +340,8 @@ def generate_api_questions(
 
     Args:
         chat_completer (ChatCompleter): The chat completer client.
-        chunk (str): The chunk to generate instructions for.
-        x (int, optional): The number of instructions to generate. Defaults to 5.
+        chunk (str): The chunk to generate questions for.
+        x (int, optional): The number of questions to generate per chunk. Defaults to 5.
         model (str | None, optional): The completions model to use. Defaults to None.
 
     Returns:
@@ -429,8 +439,8 @@ def generate_general_questions(
 
     Args:
         chat_completer (ChatCompleter): The chat completer client.
-        chunk (str): The chunk to generate instructions for.
-        x (int): The number of instructions to generate. Defaults to 5.
+        chunk (str): The chunk to generate questions for.
+        x (int): The number of questions to generate per chunk. Defaults to 5.
         model (str | None, optional): The completions model to use. Defaults to None.
         system_prompt_key (str, optional): The system prompt key. Either "gpt" or "llama". Defaults to "gpt".
 
@@ -512,6 +522,7 @@ def encode_api_question(question: str, chunk: str) -> list[str]:
     return prompts
 
 
+# Chain-of-Thought prompt templates for GPT or Llama
 prompt_templates = {
     "gpt": """
         Question: {question}\nContext: {context}\n
@@ -567,16 +578,20 @@ def encode_general_question(
     """
     prompts = []
 
+    # Construct Chain-of-Thought prompt for either GPT or Llama
     prompt = prompt_templates[system_prompt_key].format(
         question=question, context=chunk
     )
+    # Append system prompt
     prompts.append(
         {
             "role": "system",
             "content": "You are a helpful question answerer who can provide an answer given a question and relevant context.",
         }
     )
+    # Append user prompt
     prompts.append({"role": "user", "content": prompt})
+    # Returns prompts as messages
     return prompts
 
 
@@ -589,7 +604,7 @@ def generate_answer(
     system_prompt_key: str = "gpt",
 ) -> str | None:
     """
-    Generates the label / answer to `question` using `context` and GPT-4.
+    Generates the Chain-of-Thought label / answer to `question` using `context` and GPT-4.
 
     Args:
         chat_completer (ChatCompleter): The chat completer client.
@@ -602,6 +617,7 @@ def generate_answer(
     Returns:
         str | None: The generated label / answer.
     """
+    # Messages containing the system and user prompts
     question = (
         encode_api_question(question, chunk=context)
         if doc_type == "api"
@@ -609,6 +625,7 @@ def generate_answer(
             question, chunk=context, system_prompt_key=system_prompt_key
         )
     )
+    # Generates the answer
     response: ChatCompletion = chat_completer(
         model=model,
         messages=question,
@@ -647,7 +664,7 @@ def generate_question_cot_answer(
         question (str): The question related to the context, if oracle document is present. Otherwise, unrelated.
         doc_type (DocType, optional): The type of the document. Defaults to "pdf".
         num_distract (int, optional): The number of distractor documents to add. Defaults to 3.
-        p (float, optional): Probability of including the oracle document in the context. Defaults to 1.0.
+        p (float, optional): The probability of including the oracle document in the context. Defaults to 1.0.
         model (str | None, optional): The completions model to use. Defaults to None.
         system_prompt_key (str, optional): The system prompt key. Either "gpt" or "llama". Defaults to "gpt".
 
@@ -655,6 +672,7 @@ def generate_question_cot_answer(
         dict: A dictionary containing the data point with keys for id, type, question,
             context, oracle_context, chain-of-thought answer, and instruction.
     """
+    # Dictionary to store the data point / triplet
     datapt = {
         "id": None,
         "type": None,
@@ -697,7 +715,7 @@ def generate_question_cot_answer(
 
     datapt["context"] = d
     datapt["oracle_context"] = chunk
-    # Add answer to question
+    # Add CoT answer to question
     datapt["cot_answer"] = generate_answer(
         chat_completer,
         question,
@@ -790,7 +808,29 @@ def stage_generate(
     num_distract: int = 3,
     p: float = 1.0,
     qa_threshold: int | None = None,
-):
+) -> Dataset:
+    """
+    The main function that generates the RAFT dataset.
+
+    Args:
+        chat_completer (ChatCompleter): The chat completer client.
+        checkpoints_dir (Path): The path to the checkpoints directory.
+        chunks (list[str]): The list of chunks.
+        num_questions (int, optional): The number of questions to generate per chunk. Defaults to 5.
+        max_workers (int, optional): The maximum number of threads to use. Defaults to 2.
+        doc_type (DocType, optional): The type of the document. Defaults to "pdf".
+        completion_model (str, optional): The completion / teacher model to use. Defaults to "gpt-4".
+        system_prompt_key (str, optional): The system prompt key. Defaults to "gpt".
+        num_distract (int, optional): The number of distractor documents to add. Defaults to 3.
+        p (float, optional): The probability of including the oracle document in the context. Defaults to 1.0.
+        qa_threshold (int | None, optional): The maximum nmber of questions to generate. Defaults to None.
+
+    Raises:
+        StoppingException: Raises an exception if the process is stopping early.
+
+    Returns:
+        Dataset: The dataset of questions, contexts, oracle contexts, chain-of-thought answers and instructions.
+    """
     questions_checkpointing = Checkpointing(checkpoints_dir / "questions")
     answers_checkpointing = Checkpointing(checkpoints_dir / "answers")
 
@@ -806,7 +846,7 @@ def stage_generate(
         Generates a dataset of questions / instructions for a given chunk.
 
         Args:
-            chunk (str): The chunk to generate questions / instructions for.
+            chunk (str): The chunk to generate questions for.
             chunk_id (int): The id of the chunk.
             doc_type (DocType): The type of the document.
 
@@ -894,8 +934,23 @@ def stage_generate(
         return ds
 
     def process_chunk(index: int) -> Dataset:
+        """
+        Processes each chunk by generating the questions and answers datasets.
+
+        Args:
+            index (int): Takes in an index as a pointer to a checkpointed chunk.
+                If it exists, it will load the dataset from the checkpoint. Otherwise,
+                it will generate the dataset.
+
+        Raises:
+            StoppingException: Raises an exception if the process is stopping early.
+
+        Returns:
+            Dataset: A dataset of chain-of-thought answers for a given dataset of questions / instructions.
+        """
         if is_stopping.is_set():
             raise StoppingException()
+        # Get the oracle chunk
         chunk = chunks[index]
         questions_ds = generate_chunk_questions_ds(
             chunk=chunk,
@@ -908,7 +963,6 @@ def stage_generate(
         )
         answers_ds = generate_question_cot_answers(
             questions_ds=questions_ds,
-            chunk=chunk,
             chunk_id=index,
             chat_completer=chat_completer,
             model=completion_model,
@@ -1052,12 +1106,12 @@ def main():
     # Build or load chunks
     chunks = build_or_load_chunks(
         datapath,
+        checkpoints_dir,
         args.doc_type,
         CHUNK_SIZE,
         args.embedding_env_prefix,
         OPENAPI_API_KEY,
         args.embedding_model,
-        checkpoints_dir,
     )
 
     cot_answers_ds = None
@@ -1100,6 +1154,11 @@ def main():
     if args.output_format == "completion":
         format_params["prompt_column"] = args.output_completion_prompt_column
         format_params["completion_column"] = args.output_completion_completion_column
+        format_params["stop"] = args.output_completion_stop
+
+    logger.info(
+        f"Converting Arrow file from {args.output}/data-00000-of-00001.arrow to {args.output_type} {args.output_format} file {append_extension(args.output, 'jsonl')}."
+    )
 
     formatter.convert(
         cot_answers_ds,
@@ -1114,7 +1173,7 @@ def main():
         shutil.rmtree(checkpoints_dir)
 
     logger.info(f"Generated {len(cot_answers_ds)} QA/CoT/documents samples.")
-    logger.info(f"Dataset saved to {output_path}.")
+    logger.info(f"Dataset saved to {args.output}.")
     logger.info(f"Done in {time.time() - main_start:.2f}s.")
 
 

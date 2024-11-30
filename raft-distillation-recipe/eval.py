@@ -7,7 +7,9 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Literal, get_args
 
+from client_utils import StatsCompleter, UsageStats, build_openai_client
 from dotenv import load_dotenv
+from logconf import log_setup
 from openai import RateLimitError
 from openai.types.chat import ChatCompletionMessageParam
 from openai.types.chat.chat_completion import ChatCompletion
@@ -20,9 +22,6 @@ from tenacity import (
     wait_exponential,
 )
 from tqdm import tqdm
-
-from client_utils import StatsCompleter, UsageStats, build_openai_client
-from logconf import log_setup
 
 log_setup()
 
